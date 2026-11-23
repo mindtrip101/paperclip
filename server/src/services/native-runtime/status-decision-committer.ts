@@ -47,6 +47,11 @@ import {
 } from "./chat-attachment-reuse.js";
 import { issueService } from "../issues.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
+import {
+  automaticSameAgentContinuationEnabled,
+  readIssueOpenPullRequestUrl,
+  sameAgentContinuationDisposition,
+} from "./codex-run-guards.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { buildIssueBlockersResolvedWakeIdempotencyKey } from "../issue-dependency-wakeups.js";
 import {
@@ -736,6 +741,70 @@ async function materializeDecisionEffect(input: {
         };
     }
     if (effect.continuationKind === "monitor") throw new Error("Monitor delivery belongs to the issue monitor scheduler");
+    if (effect.continuationKind === "same_agent") {
+      const openPullRequestUrl = await readIssueOpenPullRequestUrl(input.tx, input.companyId, input.issue.id);
+      if (openPullRequestUrl) {
+        return {
+          effectKind: effect.kind,
+          targetType: "issue",
+          targetId: input.issue.id,
+          payload: {
+            continuationKind: effect.continuationKind,
+            summary: effect.summary,
+            stopped: "pull_request_open",
+            pullRequestUrl: openPullRequestUrl,
+          },
+        };
+      }
+      const [agent] = await input.tx.select({ adapterConfig: agents.adapterConfig }).from(agents).where(and(
+        eq(agents.id, effect.agentId),
+        eq(agents.companyId, input.companyId),
+      )).limit(1);
+      if (sameAgentContinuationDisposition({
+        continuationKind: effect.continuationKind,
+        automatic: automaticSameAgentContinuationEnabled(
+          agent?.adapterConfig,
+          process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION,
+        ),
+      }) === "require_approval") {
+        const interaction = await issueThreadInteractionService(input.tx).create(input.issue, {
+          kind: "request_confirmation",
+          idempotencyKey: `native-status:${input.decisionId}:continuation-approval`,
+          sourceRunId: input.runId,
+          resolverPolicy: "human_only",
+          title: "Approve another run",
+          summary: effect.summary,
+          continuationPolicy: "wake_assignee_on_accept",
+          payload: {
+            version: 1,
+            prompt: effect.summary,
+            detailsMarkdown: "Paperclip will not start another run for this agent until you approve it.",
+            acceptLabel: "Start follow-up run",
+            rejectLabel: "Stop",
+            allowDeclineReason: true,
+            rejectRequiresReason: false,
+            supersedeOnUserComment: false,
+            target: {
+              type: "custom",
+              key: "same_agent_continuation",
+              revisionId: input.decisionId,
+              label: "Same-agent continuation",
+            },
+          },
+        }, { systemId: "native-status-committer", runId: input.runId });
+        return {
+          effectKind: effect.kind,
+          targetType: "issue_thread_interaction",
+          targetId: interaction.id,
+          payload: {
+            continuationKind: effect.continuationKind,
+            summary: effect.summary,
+            requiresApproval: true,
+            interactionId: interaction.id,
+          },
+        };
+      }
+    }
     const wakeId = await enqueueWake({
       tx: input.tx,
       companyId: input.companyId,

@@ -17,6 +17,7 @@ import { isAcpxCanonicalInputMethod } from "../drivers/acpx/profile-extensions.j
 import { RunnerdTraceFrameIndex } from "./runnerd-trace-frame-index.js";
 import { waitForWarmAttachmentReadiness } from "./warm-attachment-readiness.js";
 import { resolveCodexCommand } from "../drivers/codex/codex-command.js";
+import { codexSpawnMaxRuntimeMs } from "./codex-run-guards.js";
 import { isCanonicalProviderEventType } from "../provider-events.js";
 import { execFileSync } from "node:child_process";
 import { readLinuxProcessStartedAt } from "./linux-process-start.js";
@@ -1297,6 +1298,11 @@ export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionD
   closeGraceMs?: number;
   /** Bounded provider turn-admission wait; defaults to 30 seconds. */
   turnStartTimeoutMs?: number;
+  /**
+   * Agent `timeoutSeconds`. A positive value limits this Codex runnerd process
+   * on start and resume. Unset keeps the unlimited spawn.
+   */
+  timeoutSeconds?: number | null;
   onDiagnostic?: (message: string) => void;
   onEvidence?: (evidence: Readonly<CapabilityRunnerdProcessEvidence>) => void;
   /** Persist process ownership immediately after spawn, before waiting for
@@ -5073,7 +5079,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       ticket: core.issueBootstrapTicket(RUNNER_BOOTSTRAP_TICKET_TTL_MS),
       maxOutboxBytes: RUNNERD_MAX_OUTBOX_BYTES,
       p0ReserveBytes: RUNNERD_P0_RESERVE_BYTES,
-      maxRuntimeMs: 0,
+      maxRuntimeMs: codexSpawnMaxRuntimeMs(this.options.timeoutSeconds),
       reconnectGraceMs: this.options.runnerReconnectGraceMs,
       lifecyclePolicy: this.options.lifecyclePolicy,
       runnerBinaryPath,
@@ -5758,7 +5764,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ticket: bootstrapTicket!,
           maxOutboxBytes: RUNNERD_MAX_OUTBOX_BYTES,
           p0ReserveBytes: RUNNERD_P0_RESERVE_BYTES,
-          maxRuntimeMs: 0,
+          maxRuntimeMs: codexSpawnMaxRuntimeMs(this.options.timeoutSeconds),
           reconnectGraceMs: this.options.runnerReconnectGraceMs,
           lifecyclePolicy: this.options.lifecyclePolicy,
           runnerBinaryPath,

@@ -77,6 +77,7 @@ export function createNativeSessionBackend(
       observability: options.observability,
       workingDirectoryAuthority: options.workingDirectoryAuthority,
       transportFactory: options.codexTransportFactory,
+      runLimits: options.runLimits,
     });
   }
   if (input.provider.kind === "opencode") {

@@ -146,6 +146,10 @@ export class CodexSessionState {
   readonly lineageByThread = new Map<string, HarnessThreadLineageEntry>();
   currentGoal: HarnessThreadGoal | null = null;
   interruptQueued = false;
+  maxIterations: number | null = null;
+  pullRequestUrl: string | null = null;
+  completedSteps = 0;
+  guardStop: { reasonCode: string; message: string } | null = null;
   steerSequence = 0;
   readonly acknowledgedSteeringCorrelations = new Map<string, string>();
   interruptSequence = 0;
@@ -182,6 +186,8 @@ export class CodexSessionState {
     dynamicTools: readonly Readonly<Record<string, unknown>>[];
     completionFeedback?: CodexAppServerDriverOptions["completionFeedback"];
     dynamicToolHandler?: CodexAppServerDriverOptions["dynamicToolHandler"];
+    maxIterations?: number | null;
+    pullRequestUrl?: string | null;
   }) {
     this.codexUsageBaseline = input.codexUsageBaseline ?? null;
     if (this.codexUsageBaseline) this.usageSnapshot = codexRunUsage(this.codexUsageBaseline);
@@ -206,6 +212,8 @@ export class CodexSessionState {
     this.reasoningEffort = input.reasoningEffort;
     this.dynamicTools = input.dynamicTools;
     this.dynamicToolHandler = input.dynamicToolHandler;
+    this.maxIterations = input.maxIterations ?? null;
+    this.pullRequestUrl = input.pullRequestUrl ?? null;
     this.completionFeedback = input.completionFeedback;
     this.currentGoal = input.goal === undefined ? null : structuredClone(input.goal);
     for (const entry of input.lineage ?? [input.opened.lineage]) {

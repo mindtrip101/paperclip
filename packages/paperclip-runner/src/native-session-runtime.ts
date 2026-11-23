@@ -2593,8 +2593,9 @@ export async function executeNativeSession(
             if ("requestedSkills" in modelEnvelope) modelEnvelope.requestedSkills = [];
             modelEnvelope.task.prompt = [
               "Paperclip semantic-result recovery for a prior completed provider turn.",
-              "The prior turn already performed the work and its user-facing final answer is recorded.",
+              "Report only what that turn actually did. Exploring the repository is not a completed change.",
               "Do not repeat implementation, tests, research, or the final answer.",
+              "If the repository has no change and no pull request, do not report the task done.",
               "Use the existing session context to invoke exactly one paperclip_finish or paperclip_block with the accurate current disposition, then stop without additional user-facing prose.",
             ].join("\n");
           }

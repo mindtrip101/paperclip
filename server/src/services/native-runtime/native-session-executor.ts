@@ -16,6 +16,15 @@ import { createRunPreparationTiming } from "../execution-preparation-timing.js";
 import { configuredEnvironment } from "../../vendor/paperclip-runner/index.js";
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
 import { agents } from "@paperclipai/db";
+import {
+  classifyHonestRunOutcome,
+  codingChangeRequired,
+  inspectRepositoryChange,
+  isHonestRunFailureCode,
+  loadCodexRunLimits,
+  readGitHead,
+  type CodexRunLimits,
+} from "./codex-run-guards.js";
 import { isCloudManagedInstance } from "../cloud-instance.js";
 import { dotRunnerBroker } from "../dot-runner-broker.js";
 import { CURSOR_DISTRIBUTION_PINS, QUALIFIED_ACPX_PROFILES, QUALIFIED_ACPX_VERSION } from "../../vendor/paperclip-runner/index.js";
@@ -6329,12 +6338,13 @@ export function nativeSessionFailureDisposition(
     sourceFailureCode === "native_adopted_runner_authentication_timeout" ||
     sourceFailureCode === "native_provider_usage_limit";
   const permissionDeclined = sourceFailureCode === "native_permission_declined";
-  const exhausted = permanentFailure || permissionDeclined || attempt >= 3;
+  const honestStop = isHonestRunFailureCode(sourceFailureCode) || sourceFailureCode === "pull_request_open";
+  const exhausted = permanentFailure || permissionDeclined || honestStop || attempt >= 3;
   return {
     phase: exhausted
       ? ("terminal_failure" as const)
       : ("retryable_failure" as const),
-    failureCode: permanentFailure || permissionDeclined
+    failureCode: permanentFailure || permissionDeclined || honestStop
       ? sourceFailureCode!
       : exhausted
         ? ("native_session_retry_exhausted" as const)
@@ -6353,7 +6363,9 @@ export function nativeSessionRecoveryProjection(input: {
     exhausted,
     issueStatus:
       exhausted &&
-      input.failureCode !== NATIVE_ADOPTED_RUNNER_AUTHENTICATION_TIMEOUT
+      input.failureCode !== NATIVE_ADOPTED_RUNNER_AUTHENTICATION_TIMEOUT &&
+      !isHonestRunFailureCode(input.failureCode) &&
+      input.failureCode !== "pull_request_open"
         ? ("blocked" as const)
         : null,
     recoveryOwner: exhausted
@@ -6396,7 +6408,14 @@ export function nativeSessionFailureSourceCode(
   | "native_provider_model_rejected"
   | "native_current_wake_comments_unread"
   | "native_current_wake_comments_changed_after_read"
-  | "native_session_interrupted" {
+  | "native_session_interrupted"
+  | "max_iterations_exceeded"
+  | "pull_request_open"
+  | "no_output"
+  | "change_required_but_missing"
+  | "workspace_clone_failed"
+  | "workspace_authentication_failed"
+  | "workspace_push_failed" {
   if (error instanceof NativePermissionDeclinedError) return "native_permission_declined";
   if (error instanceof NativeProviderTerminalFailure) {
     if (error.providerCode === "approval_required") return "native_provider_approval_required";
@@ -6479,6 +6498,13 @@ export function nativeSessionFailureSourceCode(
   if (/native_current_wake_comments_unread/i.test(message)) {
     return "native_current_wake_comments_unread";
   }
+  if (/max_iterations_exceeded/i.test(message)) return "max_iterations_exceeded";
+  if (/pull_request_open/i.test(message)) return "pull_request_open";
+  if (/change_required_but_missing/i.test(message)) return "change_required_but_missing";
+  if (/workspace_clone_failed|failed to clone the repository/i.test(message)) return "workspace_clone_failed";
+  if (/workspace_authentication_failed|failed to authenticate/i.test(message)) return "workspace_authentication_failed";
+  if (/workspace_push_failed|failed to push/i.test(message)) return "workspace_push_failed";
+  if (/no_output|without a result, diff, or pull request/i.test(message)) return "no_output";
   return "native_session_interrupted";
 }
 
@@ -7829,6 +7855,14 @@ async function executePaperclipNativeSessionWithinScope(
   ) {
     throw new Error("paperclip_runner_provider_unsupported");
   }
+  const codexRunLimits: CodexRunLimits = input.execution.provider.kind === "codex"
+    ? await loadCodexRunLimits(
+      input.db,
+      input.execution.binding.companyId,
+      input.execution.binding.agentId,
+      input.execution.binding.issueId,
+    )
+    : { timeoutSeconds: null, maxIterations: null, openPullRequestUrl: null };
   if (
     input.execution.provider.kind === "acpx" &&
     ["copilot"].includes(input.execution.provider.agent) &&
@@ -8586,6 +8620,7 @@ async function executePaperclipNativeSessionWithinScope(
     },
   );
   let native: Awaited<ReturnType<typeof executeNativeSession>>;
+  let repositoryBaseHead: string | null = null;
   let releaseGoalController: (() => void) | null = null;
   const releaseRegisteredGoalController = () => {
     // The controller is assigned from the asynchronous onSession callback.
@@ -8886,6 +8921,9 @@ async function executePaperclipNativeSessionWithinScope(
           )).then(rows => rows[0])
       : null;
     nativeSessionExecuteStartedAtMs = Date.now();
+    if (input.execution.provider.kind === "codex") {
+      repositoryBaseHead = await readGitHead(input.execution.workspace.cwd);
+    }
     native = await trace.measure(
       "native.session.execute",
       async () => {
@@ -9781,6 +9819,50 @@ async function executePaperclipNativeSessionWithinScope(
     .returning({ runId: nativeRunFinalizations.runId })
     .then((rows) => rows[0] ?? null));
   if (!released) throw new Error("native_session_lease_lost");
+  const repositoryInspection = input.execution.provider.kind === "codex"
+    ? await inspectRepositoryChange(input.execution.workspace.cwd, repositoryBaseHead)
+    : { available: false, producedChange: false, error: null as string | null };
+  const continuation = native.result?.continuation;
+  const runnerHonesty = input.execution.provider.kind === "codex"
+    ? classifyHonestRunOutcome({
+      exitCode: native.terminal.runTerminalState === "succeeded" ? 0 : 1,
+      semanticResultPresent: native.result != null,
+      reportedDisposition: native.result?.reportedWorkDisposition ?? null,
+      continuationKind: continuation && typeof continuation === "object" && "kind" in continuation
+        ? String(continuation.kind ?? "")
+        : null,
+      producedChange: repositoryInspection.producedChange || Boolean(codexRunLimits.openPullRequestUrl),
+      changeRequired: repositoryInspection.available && codingChangeRequired({
+        workMode: input.execution.task.workMode,
+        repoUrl: input.execution.workspace.repoUrl,
+      }),
+      pullRequestUrl: codexRunLimits.openPullRequestUrl,
+      workspaceErrors: repositoryInspection.error ? [repositoryInspection.error] : [],
+      summary: native.result?.summary ?? null,
+    })
+    : null;
+  if (runnerHonesty?.outcome === "failed" && native.terminal.runTerminalState === "succeeded") {
+    native = {
+      ...native,
+      terminal: {
+        ...native.terminal,
+        turnTerminalState: "failed",
+        runTerminalState: "failed",
+      },
+    };
+  }
+  if (runnerHonesty) {
+    await input.db.update(heartbeatRuns).set({
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ runnerHonesty })}::jsonb`,
+      ...(runnerHonesty.outcome === "failed"
+        ? { error: runnerHonesty.message, errorCode: runnerHonesty.reasonCode }
+        : {}),
+      updatedAt: new Date(),
+    }).where(and(
+      eq(heartbeatRuns.id, input.execution.binding.runId),
+      eq(heartbeatRuns.companyId, input.execution.binding.companyId),
+    ));
+  }
   const finalization: NativeFinalizationResult = {
     schema: "paperclip.native-finalization.v1",
     runtimeMode: "native",
@@ -9846,11 +9928,16 @@ async function executePaperclipNativeSessionWithinScope(
     signal: null,
     timedOut: false,
     errorMessage:
-      native.terminal.runTerminalState === "succeeded"
-        ? null
-        : providerFailure?.errorMessage ?? `Native session ${native.terminal.runTerminalState}`,
-    ...(providerFailure ? { errorCode: providerFailure.errorCode } : {}),
+      runnerHonesty?.outcome === "failed"
+        ? runnerHonesty.message
+        : native.terminal.runTerminalState === "succeeded"
+          ? null
+          : providerFailure?.errorMessage ?? `Native session ${native.terminal.runTerminalState}`,
+    ...(runnerHonesty?.outcome === "failed"
+      ? { errorCode: runnerHonesty.reasonCode ?? "no_output" }
+      : providerFailure ? { errorCode: providerFailure.errorCode } : {}),
     resultJson: {
+      ...(runnerHonesty ? { runnerHonesty } : {}),
       nativeResult: native.result as unknown as Record<string, unknown>,
       nativeTerminal: native.terminal as unknown as Record<string, unknown>,
       ...((input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v8") ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
@@ -11638,6 +11725,14 @@ async function createRunnerdBackendWithinSessionClaim(
   sessionScopeId: string,
   retainedTransition?: VerifiedWarmTransitionBinding,
 ): Promise<NativeSessionBackend & { bindManagedSession(session: NativeSession): NativeSession }> {
+  const codexRunLimits: CodexRunLimits = input.execution.provider.kind === "codex"
+    ? await loadCodexRunLimits(
+      input.db,
+      input.execution.binding.companyId,
+      input.execution.binding.agentId,
+      input.execution.binding.issueId,
+    )
+    : { timeoutSeconds: null, maxIterations: null, openPullRequestUrl: null };
   const timeController = createRunPreparationTiming(input.execution.binding.runId, "native.controller");
   let recoveryPending = retainedTransition !== undefined;
   const target = input.runnerExecutionTarget ?? { kind: "local" as const };
@@ -11823,8 +11918,10 @@ async function createRunnerdBackendWithinSessionClaim(
       // its host environment out of the plugin and records the prepared directory.
       runnerInstanceId: prior?.runnerInstanceId ?? effectiveRunnerInstanceId, environment: {},
       workingDirectoryAuthority: "runner_prepared_launch", dynamicTools, dynamicToolHandler: executeTool,
+      runLimits: { maxIterations: codexRunLimits.maxIterations, pullRequestUrl: codexRunLimits.openPullRequestUrl },
       completionFeedback: async result => { await authorityEpoch.definitions(); return nativeCompletionFeedback(input.db, input.execution.binding.runId, result); },
       codexTransportFactory: recovery => createRunnerdCodexTransport({ provider: provider.kind, stateDirectory: root,
+        timeoutSeconds: codexRunLimits.timeoutSeconds,
         ...owner.driver, runnerArtifact: description.runner,
         ...(provider.kind === "acpx" ? { acpxAgent: provider.agent,
           acpxCandidateProfile: provider.agent === "pi" ? undefined : resolveAcpxQualification(provider, process.env),
@@ -13196,6 +13293,7 @@ async function createRunnerdBackendWithinSessionClaim(
     return current.execute(call);
   };
   const backend = createNativeSessionBackend(runnerExecution, {
+    runLimits: { maxIterations: codexRunLimits.maxIterations, pullRequestUrl: codexRunLimits.openPullRequestUrl },
     runnerInstanceId:
       retainedTransition?.runnerInstanceId ?? input.runnerInstanceId,
     environment: effectiveRunnerEnvironment,
@@ -13227,6 +13325,7 @@ async function createRunnerdBackendWithinSessionClaim(
     ),
     codexTransportFactory: (recoveryContext) =>
       createRunnerdCodexTransport({
+        timeoutSeconds: codexRunLimits.timeoutSeconds,
         onSpawn: input.onSpawn,
         homeMode: preconfiguredHome ? "preconfigured" : "isolated",
         onCredentialsUpdated: (event) => appendNativeCredentialUpdate(input.db, {

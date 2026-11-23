@@ -16,6 +16,7 @@ import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execut
 import { isWorkspaceGitScanError } from "../workspace-git-operation-scheduler.js";
 import { and, eq, sql } from "drizzle-orm";
 import { heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { classifyHonestRunOutcome, runnerHonestyFrom } from "../native-runtime/codex-run-guards.js";
 import { HttpError } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { normalizeResponsibleUserDenialCode } from "../responsible-user-denial-run-outcomes.js";
@@ -420,6 +421,26 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     } else {
       outcome = "failed";
     }
+    const storedHonesty = runnerHonestyFrom(adapterResult.resultJson);
+    let honestyMessage: string | null = storedHonesty?.outcome === "failed" ? storedHonesty.message : null;
+    let honestyCode: string | null = storedHonesty?.outcome === "failed" ? storedHonesty.reasonCode : null;
+    if (outcome === "succeeded" && storedHonesty?.outcome === "failed") outcome = "failed";
+    if (outcome === "succeeded") {
+      const exitMissing = adapterResult.exitCode === null || adapterResult.exitCode === undefined;
+      const honest = classifyHonestRunOutcome({
+        exitCode: exitMissing ? null : adapterResult.exitCode,
+        errorMessage: adapterResult.errorMessage,
+        summary: adapterResult.summary,
+        semanticResultPresent: Boolean(adapterResult.nativeFinalization),
+        producedChange: !exitMissing,
+        changeRequired: false,
+      });
+      if (honest.outcome === "failed") {
+        outcome = "failed";
+        honestyMessage = honest.message;
+        honestyCode = honest.reasonCode;
+      }
+    }
 
     const nextSessionState = resolveNextSessionState({
       adapterType: agent.adapterType,
@@ -446,7 +467,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         : outcome === "succeeded"
           ? null
           : redactCurrentUserText(
-              adapterResult.errorMessage ??
+              honestyMessage ??
+                adapterResult.errorMessage ??
                 (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
               currentUserRedactionOptions,
             );
@@ -458,7 +480,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         : outcome === "cancelled"
           ? (latestRun?.errorCode ?? "cancelled")
           : outcome === "failed"
-            ? (adapterResult.errorCode ??
+            ? (honestyCode ??
+              adapterResult.errorCode ??
               recordedResponsibleUserDenialCode ??
               "adapter_failed")
             : null;
