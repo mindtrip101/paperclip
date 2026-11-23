@@ -7,6 +7,7 @@ import { assertTaskWorkspaceExecutionAccess } from "../task-workspace-access.js"
 import { preparePluginWorkspace, type WorkspaceWorkers } from "../plugin-workspaces.js";
 import { readWorkspaceProviderBinding } from "@paperclipai/shared";
 import { nativeExecutionUsesTaskWorkspace } from "./external-provider.js";
+import { classifyWorkspaceFailure } from "../native-runtime/codex-run-guards.js";
 import { readGitCacheRestoration } from "../git-workspace-restoration.js";
 import { createHeartbeatPreparationTiming } from "./preparation-timing.js";
 import {
@@ -461,6 +462,27 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       localPathOnlyWorkspace: resolvedWorkspace.localPathOnlyWorkspace,
     },
   }));
+  const materializationFailure = resolvedWorkspace.baseCwdFallback
+    ? resolvedWorkspace.materializationFailures.find((failure) => classifyWorkspaceFailure(failure.error))
+    : undefined;
+  if (materializationFailure) {
+    const kind = classifyWorkspaceFailure(materializationFailure.error);
+    const action = kind === "authenticate" ? "authenticate" : kind === "push" ? "push" : "clone the repository";
+    throw new WorkspaceValidationFailure(
+      `The run failed to ${action}: ${materializationFailure.error}`,
+      {
+        ...(materializationFailure.connectionFailure ? { connectionFailure: materializationFailure.connectionFailure } : {}),
+        workspaceValidation: {
+          reason: kind === "authenticate"
+            ? "workspace_authentication_failed"
+            : kind === "push"
+              ? "workspace_push_failed"
+              : "workspace_clone_failed",
+          materializationFailures: resolvedWorkspace.materializationFailures,
+        },
+      },
+    );
+  }
   const workspaceStrategyForFingerprint = parseObject(
     hostExecutionWorkspaceConfig.workspaceStrategy,
   );

@@ -35,6 +35,7 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import { classifyNativeEvidence } from "./evidence-classifier.js";
+import { isHonestRunFailureCode, readIssueOpenPullRequestUrl, runnerHonestyFrom } from "./codex-run-guards.js";
 import type { PrpIgnoredAttentionRequest, PrpTerminalState } from "@paperclipai/paperclip-runner";
 import {
   arbitrateNativeStatus,
@@ -664,9 +665,14 @@ async function projectCommittedRun(input: {
   if (!["succeeded", "failed", "cancelled"].includes(String(terminalState))) {
     throw new Error("native_finalization_invalid");
   }
-  const projectedStatus = projectNativeTerminalRunStatus(
-    terminalState as "succeeded" | "failed" | "cancelled",
-  );
+  const storedHonesty = runnerHonestyFrom(input.run.resultJson);
+  const honestFailure = isHonestRunFailureCode(input.run.errorCode) || storedHonesty?.outcome === "failed";
+  const projectedStatus = honestFailure
+    ? "failed" as const
+    : projectNativeTerminalRunStatus(
+      terminalState as "succeeded" | "failed" | "cancelled",
+    );
+  const clearSuccessfulTerminal = terminalState === "succeeded" && !honestFailure;
   const needsRepair = and(
     eq(heartbeatRuns.id, input.run.id),
     eq(heartbeatRuns.runtimeMode, "native"),
@@ -698,7 +704,7 @@ async function projectCommittedRun(input: {
       sql`${heartbeatRuns.resultJson}->>'nextAttemptAt' is not null`,
       sql`${heartbeatRuns.resultJson}->>'failureCode' is not null`,
       sql`${heartbeatRuns.resultJson}->>'originalFailureCode' is not null`,
-      ...(terminalState === "succeeded"
+      ...(clearSuccessfulTerminal
         ? [isNotNull(heartbeatRuns.error), isNotNull(heartbeatRuns.errorCode)]
         : []),
     ),
@@ -719,7 +725,14 @@ async function projectCommittedRun(input: {
         finishedAt: input.run.finishedAt ?? now,
         nativePhase: "committed",
         nativePhaseUpdatedAt: now,
-        ...(terminalState === "succeeded"
+        ...(honestFailure
+          ? {
+              error: input.run.error ?? storedHonesty?.message ?? "The run did not produce the required result.",
+              errorCode: isHonestRunFailureCode(input.run.errorCode)
+                ? input.run.errorCode
+                : storedHonesty?.reasonCode ?? "no_output",
+            }
+          : clearSuccessfulTerminal
           ? {
               error: null,
               errorCode: null,
@@ -1408,7 +1421,13 @@ export async function finalizeNativeRun(input: {
       authoritativeIssue.executionRunId !== run.id && authoritativeIssue.checkoutRunId !== run.id
       ? await readNativeMonitorDelivery(input.db, { companyId: run.companyId, issueId: coordinator.issueId, runId: run.id })
       : null;
+    const storedHonesty = runnerHonestyFrom(run.resultJson);
+    const openPullRequestUrl = await readIssueOpenPullRequestUrl(input.db, run.companyId, authoritativeIssue.id);
     const proposedDecision = resolveNativeFinalizerStatus({
+      honestyFailure: storedHonesty?.outcome === "failed" && storedHonesty.reasonCode && storedHonesty.message
+        ? { reasonCode: storedHonesty.reasonCode, message: storedHonesty.message }
+        : null,
+      openPullRequestUrl,
       caseHandoffAuthorized: Boolean(await assertNativeCaseHandoffResult(input.db, run.id, authoritativeIssue.id, result)),
       monitorWaitDispatched: monitorDelivery !== null,
       monitorWaitAuthorized: authoritativeIssue.workMode === "standard" && authoritativeIssue.executionRunId === run.id && monitorWaitAt !== null,
@@ -1422,7 +1441,9 @@ export async function finalizeNativeRun(input: {
         ? nativeReview.interaction.status === "pending" ? "pending" as const : "resolved" as const
         : "stale" as const } : {}),
       assessment,
-      terminalState: terminalState as "succeeded" | "failed" | "cancelled",
+      terminalState: storedHonesty?.outcome === "failed"
+        ? "failed"
+        : terminalState as "succeeded" | "failed" | "cancelled",
       workspaceFinalizeStatus: input.workspaceFinalizeStatus,
       governanceGate,
       allowIncompleteContinuation,

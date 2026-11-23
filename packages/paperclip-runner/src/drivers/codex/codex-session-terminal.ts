@@ -106,7 +106,9 @@ export function mapTerminalTurn(
     reconciling = false,
   ): void {
     const turnId = text(turn.id, fallbackTurnId || state.activeTurnId || "");
-    const status = text(turn.status, "completed");
+    const guarded = state.guardStop;
+    const status = guarded ? "failed" : text(turn.status, "completed");
+    if (guarded) turn.error = { code: guarded.reasonCode, message: guarded.message };
     const previous = state.terminalTurns.get(turnId);
     if (previous !== undefined) {
       const conflict = terminalReplayConflict(state, turn, previous);

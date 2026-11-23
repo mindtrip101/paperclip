@@ -45,6 +45,8 @@ export interface CodexNativeSessionBackendOptions {
   }) => CodexAppServerTransport;
   /** Current server constraints; does not commit task status before the turn ends. */
   completionFeedback?: (result: import("../protocol/replay-contract.js").PrpStructuredRunResult) => Promise<string>;
+  /** Codex step cap and an already-open pull request, when the agent configured them. */
+  runLimits?: { maxIterations?: number | null; pullRequestUrl?: string | null };
   dynamicTools?: readonly Readonly<Record<string, unknown>>[];
   dynamicToolHandler?: (call: {
     tool: string;
@@ -192,6 +194,8 @@ function createTransportBackedNativeSessionBackend(
       dynamicTools: options.dynamicTools,
       dynamicToolHandler: options.dynamicToolHandler,
       completionFeedback: options.completionFeedback,
+      maxIterations: options.runLimits?.maxIterations,
+      pullRequestUrl: options.runLimits?.pullRequestUrl,
       environment: options.environment,
       observability: options.observability,
       workingDirectoryAuthority: options.workingDirectoryAuthority,

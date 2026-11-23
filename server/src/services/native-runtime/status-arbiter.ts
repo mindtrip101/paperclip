@@ -131,6 +131,10 @@ export function arbitrateNativeStatus(input: {
   failureRetryCount?: number;
   agentId: string;
   priorIssueStatus: NativeAuthoritativeIssueStatus;
+  /** Set when a clean provider exit must not be treated as success or retried. */
+  honestyFailure?: { reasonCode: string; message: string } | null;
+  /** Open pull request on the task. The run ends instead of continuing. */
+  openPullRequestUrl?: string | null;
 }): NativeStatusDecision {
   if (["done", "cancelled"].includes(input.priorIssueStatus)) {
     return {
@@ -250,6 +254,21 @@ export function arbitrateNativeStatus(input: {
         reasonCode: "cancellation_run_only",
         unblockDescriptor: null,
         effects: [{ kind: "release_run_resources" }],
+      };
+    }
+    if (input.honestyFailure) {
+      return {
+        policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+        statusAction: "preserve",
+        toStatus: input.priorIssueStatus,
+        reasonCode: input.honestyFailure.reasonCode,
+        unblockDescriptor: null,
+        effects: [{
+          kind: "record_finalization_error",
+          cause: input.honestyFailure.reasonCode,
+          nextAction: input.honestyFailure.message,
+          agentId: input.agentId,
+        }],
       };
     }
     return {
@@ -586,6 +605,16 @@ export function arbitrateNativeStatus(input: {
       // An answered native plan is not task completion or permission to
       // change modes. Only a new explicit user cause may continue the work.
       effects: [],
+    };
+  }
+  if (typeof input.openPullRequestUrl === "string" && input.openPullRequestUrl.trim().length > 0) {
+    return {
+      policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+      statusAction: "in_review",
+      toStatus: "in_review",
+      reasonCode: "pull_request_open",
+      unblockDescriptor: null,
+      effects: [{ kind: "release_checkout" }],
     };
   }
   if (

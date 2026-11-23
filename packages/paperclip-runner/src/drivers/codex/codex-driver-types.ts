@@ -19,6 +19,10 @@ export interface CodexAppServerDriverOptions {
   model?: string;
   /** Per-run reasoning effort sent with each Codex turn, including resumed turns. */
   reasoningEffort?: string;
+  /** Agent `maxIterations`. Unset does not cap tool steps. */
+  maxIterations?: number | null;
+  /** Open task pull request. When set, the session stops instead of continuing. */
+  pullRequestUrl?: string | null;
   approvalPolicy?: "never" | "on-request" | "untrusted";
   /** Paperclip runtime instructions. Codex receives these as additive developer
    * instructions; the historical option name remains compatible with callers. */

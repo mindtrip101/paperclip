@@ -16,6 +16,7 @@ import {
   parseCodexThreadGoal as parseThreadGoal,
   safeCodexRequestResponse as safeRequestResponse,
 } from "./codex-thread-normalization.js";
+import { observeCodexStep } from "../../live/codex-run-guards.js";
 import type { CodexSessionState } from "./codex-session-state.js";
 import {
   admitResult,
@@ -519,6 +520,24 @@ async function mapNotificationBody(state: CodexSessionState, notification: Codex
       if (itemId) state.itemChannels.delete(itemId);
       if (text(item.type) === "fileChange")
         recordWorkspaceChanges(state, turnId, item.changes, true);
+      const guard = observeCodexStep({
+        completedSteps: state.completedSteps,
+        maxIterations: state.maxIterations,
+        pullRequestUrl: state.pullRequestUrl,
+        stepKind: text(item.type, "unknown"),
+      });
+      state.completedSteps = guard.completedSteps;
+      if (guard.stop && guard.reasonCode && guard.message) {
+        state.guardStop = { reasonCode: guard.reasonCode, message: guard.message };
+        const activeTurnId = state.activeTurnId;
+        if (activeTurnId) {
+          void state.transport.request("turn/interrupt", {
+            threadId: state.opened.threadId,
+            turnId: activeTurnId,
+            reason: guard.reasonCode,
+          }).catch(() => undefined);
+        }
+      }
       return;
     }
     const deltaKinds: Record<string, string> = {

@@ -44,6 +44,42 @@ function arbitrate(
 }
 
 describe("native status authority", () => {
+  it("does not continue a run that failed honestly or already opened a pull request", () => {
+    const yielded = assessment({
+      reportedDisposition: "yielded",
+      objectiveSatisfied: false,
+      allCriteriaSatisfied: false,
+      hasBlockingRemainingWork: true,
+    });
+    expect(arbitrate({
+      assessment: yielded,
+      terminalState: "failed",
+      honestyFailure: {
+        reasonCode: "change_required_but_missing",
+        message: "The run ended without a repository change or pull request, but this task required a change.",
+      },
+    })).toMatchObject({
+      reasonCode: "change_required_but_missing",
+      effects: [expect.objectContaining({ kind: "record_finalization_error", cause: "change_required_but_missing" })],
+    });
+    expect(arbitrate({
+      assessment: yielded,
+      terminalState: "failed",
+      honestyFailure: {
+        reasonCode: "no_output",
+        message: "The run finished without a result, diff, or pull request, so it is failed instead of succeeded.",
+      },
+    }).effects.some((effect) => effect.kind === "schedule_retry" || effect.kind === "enqueue_continuation")).toBe(false);
+    expect(arbitrate({
+      assessment: yielded,
+      openPullRequestUrl: "https://github.com/acme/repo/pull/9",
+    })).toMatchObject({
+      toStatus: "in_review",
+      reasonCode: "pull_request_open",
+      effects: [{ kind: "release_checkout" }],
+    });
+  });
+
   it("preserves an open task after an accepted case handoff even if the departing model claims done", () => {
     expect(arbitrate({ caseHandoffAuthorized: true })).toMatchObject({
       statusAction: "preserve", toStatus: "in_progress", reasonCode: "case_handoff_waiting_for_release",

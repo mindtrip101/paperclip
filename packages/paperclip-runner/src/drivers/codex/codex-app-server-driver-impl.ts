@@ -983,6 +983,8 @@ export class CodexAppServerDriver implements HarnessDriver {
       reasoningEffort: this.#options.reasoningEffort,
       dynamicToolHandler: this.#options.dynamicToolHandler,
       completionFeedback: this.#options.completionFeedback,
+      maxIterations: this.#options.maxIterations,
+      pullRequestUrl: this.#options.pullRequestUrl,
     });
   }
 }
