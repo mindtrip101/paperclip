@@ -43,6 +43,59 @@ function defaultTimeoutSecForAdapter(adapterType: string) {
   return adapterType === "openclaw_gateway" ? 120 : 0;
 }
 
+function positiveFinite(value: unknown): number | null {
+  const parsed = readFiniteNumber(value);
+  if (parsed == null || parsed <= 0) return null;
+  return parsed;
+}
+
+function positiveInteger(value: unknown): number | null {
+  const parsed = positiveFinite(value);
+  if (parsed == null || !Number.isInteger(parsed)) return null;
+  return parsed;
+}
+
+export interface AgentAdapterRunBudget {
+  timeoutSec: number;
+  timeoutKeyPresent: boolean;
+  maxIterations: number | null;
+  maxRuntimeMs: number;
+}
+
+/**
+ * Agent config may store the limit as `timeoutSeconds` (native runner) or
+ * `timeoutSec` (legacy local adapters). A later config overrides an earlier
+ * one only when it actually carries a timeout key. `timeoutSeconds` wins
+ * inside one object when both are positive.
+ */
+export function resolveAgentAdapterRunBudget(
+  configs: Array<Record<string, unknown> | null | undefined>,
+): AgentAdapterRunBudget {
+  let timeoutSec = 0;
+  let timeoutKeyPresent = false;
+  let maxIterations: number | null = null;
+  for (const config of configs) {
+    if (!config) continue;
+    const hasSeconds = hasOwn(config, "timeoutSeconds");
+    const hasSec = hasOwn(config, "timeoutSec");
+    if (hasSeconds || hasSec) {
+      timeoutKeyPresent = true;
+      const fromSeconds = hasSeconds ? positiveFinite(config.timeoutSeconds) : null;
+      const fromSec = hasSec ? positiveFinite(config.timeoutSec) : null;
+      timeoutSec = Math.floor(fromSeconds ?? fromSec ?? 0);
+    }
+    if (hasOwn(config, "maxIterations")) {
+      maxIterations = positiveInteger(config.maxIterations);
+    }
+  }
+  return {
+    timeoutSec,
+    timeoutKeyPresent,
+    maxIterations,
+    maxRuntimeMs: timeoutSec > 0 ? Math.trunc(timeoutSec * 1000) : 0,
+  };
+}
+
 export function normalizeMaxTurnStopReason(value: unknown): Extract<HeartbeatRunStopReason, "max_turns_exhausted"> | null {
   return value === "max_turns_exhausted" || value === "turn_limit_exhausted"
     ? "max_turns_exhausted"
@@ -67,15 +120,19 @@ export function resolveHeartbeatRunTimeoutPolicy(
     };
   }
 
-  const hasTimeoutSec = hasOwn(config, "timeoutSec");
-  const defaultTimeoutSec = defaultTimeoutSecForAdapter(adapterType);
-  const rawTimeoutSec = hasTimeoutSec ? readFiniteNumber(config.timeoutSec) : defaultTimeoutSec;
-  const timeoutSec = Math.max(0, Math.floor(rawTimeoutSec ?? defaultTimeoutSec));
-
+  const budget = resolveAgentAdapterRunBudget([config]);
+  if (!budget.timeoutKeyPresent) {
+    const defaultTimeoutSec = defaultTimeoutSecForAdapter(adapterType);
+    return {
+      effectiveTimeoutSec: defaultTimeoutSec,
+      timeoutConfigured: defaultTimeoutSec > 0,
+      timeoutSource: "default",
+    };
+  }
   return {
-    effectiveTimeoutSec: timeoutSec,
-    timeoutConfigured: timeoutSec > 0,
-    timeoutSource: hasTimeoutSec ? "config" : "default",
+    effectiveTimeoutSec: budget.timeoutSec,
+    timeoutConfigured: budget.timeoutSec > 0,
+    timeoutSource: "config",
   };
 }
 

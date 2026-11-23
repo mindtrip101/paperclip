@@ -1422,6 +1422,9 @@ export async function finalizeNativeRun(input: {
       ? await readNativeMonitorDelivery(input.db, { companyId: run.companyId, issueId: coordinator.issueId, runId: run.id })
       : null;
     const storedHonesty = runnerHonestyFrom(run.resultJson);
+    const decisionAssessment = storedHonesty?.outcome === "failed"
+      ? { ...assessment, objectiveSatisfied: false, objectiveClaimSatisfied: false, allCriteriaSatisfied: false }
+      : assessment;
     const openPullRequestUrl = await readIssueOpenPullRequestUrl(input.db, run.companyId, authoritativeIssue.id);
     const proposedDecision = resolveNativeFinalizerStatus({
       honestyFailure: storedHonesty?.outcome === "failed" && storedHonesty.reasonCode && storedHonesty.message
@@ -1440,7 +1443,7 @@ export async function finalizeNativeRun(input: {
       ...(reviewContext ? { nativeReviewOutcome: nativeReview
         ? nativeReview.interaction.status === "pending" ? "pending" as const : "resolved" as const
         : "stale" as const } : {}),
-      assessment,
+      assessment: decisionAssessment,
       terminalState: storedHonesty?.outcome === "failed"
         ? "failed"
         : terminalState as "succeeded" | "failed" | "cancelled",
@@ -1484,7 +1487,7 @@ export async function finalizeNativeRun(input: {
       priorStatusVersion: Number(authoritativeIssue.statusVersion),
       priorDecisionId: authoritativeIssue.lastStatusDecisionId,
       policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
-      assessment,
+      assessment: decisionAssessment,
       supersedesAssessmentId,
       workspaceFinalizeStatus: input.workspaceFinalizeStatus,
       monitorDelivery,

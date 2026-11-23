@@ -336,6 +336,27 @@ async function promoteDeferredWake(
   let currentIssue = issue;
   let shouldReopen = false;
   if (
+    workingCandidate.deferredCommentIds.length > 0 &&
+    workingCandidate.agentId === run.agentId &&
+    workingCandidate.requestedByActorType !== "user"
+  ) {
+    const outcomeComment = await ports.transaction.getCommentSelfAuthorship({
+      companyId: run.companyId,
+      issueId: currentIssue.id,
+      finishingRunId: run.id,
+      commentIds: workingCandidate.deferredCommentIds,
+    });
+    if (outcomeComment.allSelfAuthored) {
+      await ports.transaction.cancelDeferredWake({
+        companyId: run.companyId,
+        wakeId: workingCandidate.id,
+        reason: "The finishing agent's own comment does not wake that agent",
+        now: input.now,
+      });
+      return null;
+    }
+  }
+  if (
     !workingCandidate.authorizedFailedChatRetry &&
     workingCandidate.deferredCommentIds.length > 0 &&
     (currentIssue.status === "done" || currentIssue.status === "cancelled")

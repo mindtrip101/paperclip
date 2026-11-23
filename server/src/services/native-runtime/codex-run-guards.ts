@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { and, eq, notInArray } from "drizzle-orm";
-import { agents, issueWorkProducts, type Db } from "@paperclipai/db";
+import { resolveAgentAdapterRunBudget } from "../heartbeat-stop-metadata.js";
+import { agents, issues, issueWorkProducts, projectWorkspaces, type Db } from "@paperclipai/db";
 
 // Kept in this package so the server typecheck root stays inside server/src.
 // The runner copy in packages/paperclip-runner/src/live/codex-run-guards.ts is the
@@ -29,9 +30,20 @@ export function classifyWorkspaceFailure(message: string): WorkspaceFailureKind 
   return null;
 }
 
+export function classifyShellSpawnFailure(message: string): boolean {
+  const text = message.toLowerCase();
+  return /shell binary lookup/.test(text)
+    || /shell_unavailable/.test(text)
+    || /unable to spawn (?:a )?shell/.test(text)
+    || /spawn\s+\S*(?:zsh|bash|sh)\s+enoent/.test(text)
+    || (/enoent/.test(text) && /\b(shell|zsh|bash)\b/.test(text));
+}
+
 export const HONEST_RUN_FAILURE_CODES = [
   "no_output",
+  "no_changes_produced",
   "change_required_but_missing",
+  "shell_unavailable",
   "workspace_clone_failed",
   "workspace_authentication_failed",
   "workspace_push_failed",
@@ -76,6 +88,14 @@ export function classifyHonestRunOutcome(input: {
     const action = kind === "clone" ? "clone the repository" : kind === "authenticate" ? "authenticate" : "push";
     return { outcome: "failed", reasonCode, message: `The run failed to ${action}: ${text}` };
   }
+  const shellFailure = texts.find((text) => classifyShellSpawnFailure(text));
+  if (shellFailure && !input.producedChange && !isOpenPullRequestUrl(input.pullRequestUrl)) {
+    return {
+      outcome: "failed",
+      reasonCode: "shell_unavailable",
+      message: `shell_unavailable: the run could not start a shell. ${shellFailure}`,
+    };
+  }
   if (isOpenPullRequestUrl(input.pullRequestUrl) || input.producedChange) {
     return { outcome: "succeeded", reasonCode: null, message: null };
   }
@@ -86,8 +106,8 @@ export function classifyHonestRunOutcome(input: {
   if (input.changeRequired && !waiting) {
     return {
       outcome: "failed",
-      reasonCode: "change_required_but_missing",
-      message: "The run ended without a repository change or pull request, but this task required a change.",
+      reasonCode: "no_changes_produced",
+      message: "no_changes_produced: the run ended without a diff on the workspace branch or an open pull request.",
     };
   }
   const exitMissing = input.exitCode === undefined || input.exitCode === null;
@@ -105,6 +125,18 @@ export function classifyHonestRunOutcome(input: {
 export function codingChangeRequired(input: { workMode?: string | null; repoUrl?: string | null }): boolean {
   if (input.workMode === "ask" || input.workMode === "planning") return false;
   return typeof input.repoUrl === "string" && input.repoUrl.trim().length > 0;
+}
+
+export function shellSpawnFailureText(value: unknown, depth = 0): string | null {
+  if (depth > 6 || value == null) return null;
+  if (typeof value === "string") return classifyShellSpawnFailure(value) ? value : null;
+  if (typeof value !== "object") return null;
+  const entries = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+  for (const entry of entries) {
+    const found = shellSpawnFailureText(entry, depth + 1);
+    if (found) return found;
+  }
+  return null;
 }
 
 export function automaticSameAgentContinuationEnabled(
@@ -147,12 +179,25 @@ export async function loadCodexRunLimits(
     )).limit(1).then((rows) => rows[0] ?? null),
     readIssueOpenPullRequestUrl(db, companyId, issueId),
   ]);
-  const config = agent?.adapterConfig ?? {};
+  const budget = resolveAgentAdapterRunBudget([agent?.adapterConfig ?? {}]);
   return {
-    timeoutSeconds: readConfiguredLimit(config.timeoutSeconds, false),
-    maxIterations: readConfiguredLimit(config.maxIterations, true),
+    timeoutSeconds: budget.timeoutSec > 0 ? budget.timeoutSec : null,
+    maxIterations: budget.maxIterations,
     openPullRequestUrl: pullRequest,
   };
+}
+
+export async function readIssueWorkspaceRepoUrl(
+  db: Db,
+  companyId: string,
+  issueId: string,
+): Promise<string | null> {
+  const [row] = await db.select({ repoUrl: projectWorkspaces.repoUrl }).from(issues).leftJoin(
+    projectWorkspaces,
+    eq(projectWorkspaces.id, issues.projectWorkspaceId),
+  ).where(and(eq(issues.id, issueId), eq(issues.companyId, companyId))).limit(1);
+  const repoUrl = row?.repoUrl?.trim();
+  return repoUrl ? repoUrl : null;
 }
 
 export async function readIssueOpenPullRequestUrl(
@@ -197,8 +242,8 @@ export async function inspectRepositoryChange(
     return { available: true, producedChange, error: null };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (classifyWorkspaceFailure(message)) return { available: true, producedChange: false, error: message };
-    return { available: false, producedChange: false, error: null };
+    const classified = Boolean(classifyWorkspaceFailure(message) || classifyShellSpawnFailure(message));
+    return { available: classified, producedChange: false, error: message };
   }
 }
 

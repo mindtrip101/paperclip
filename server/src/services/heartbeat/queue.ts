@@ -1,6 +1,7 @@
 import { authorizationService } from "../authorization.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
+import { sameAgentCommentShouldWake } from "../issue-comment-wakeup.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
@@ -2196,6 +2197,31 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
     let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+    if (
+      (reason === "issue_commented" || enrichedContextSnapshot.wakeReason === "issue_commented") &&
+      wakeCommentId &&
+      opts.requestedByActorType !== "user"
+    ) {
+      const [comment] = await db.select({
+        authorAgentId: issueComments.authorAgentId,
+        createdByRunId: issueComments.createdByRunId,
+      }).from(issueComments).where(and(
+        eq(issueComments.id, wakeCommentId),
+        eq(issueComments.companyId, agent.companyId),
+      )).limit(1);
+      const [sourceRun] = comment?.createdByRunId
+        ? await db.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, comment.createdByRunId),
+          eq(heartbeatRuns.companyId, agent.companyId),
+        )).limit(1)
+        : [];
+      if (comment && !sameAgentCommentShouldWake({
+        targetAgentId: agentId,
+        authorAgentId: comment.authorAgentId,
+        createdByRunAgentId: sourceRun?.agentId ?? null,
+        requestedByActorType: opts.requestedByActorType ?? null,
+      })) return null;
+    }
     if (issueId) {
       const [pending] = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, agent.companyId), eq(caseHandoffs.issueId, issueId),
         inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1);

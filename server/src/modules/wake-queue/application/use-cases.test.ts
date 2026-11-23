@@ -571,6 +571,31 @@ describe("releaseIssueExecution", () => {
     expect(transaction.cancelDeferredWake).toHaveBeenCalledTimes(scenario === "verified" ? 0 : 1);
   });
 
+  it("does not promote the finishing agent's own outcome comment", async () => {
+    const queue = [wakeCandidate({
+      agentId: RUN.agentId,
+      requestedByActorType: "agent",
+      requestedByActorId: RUN.agentId,
+      deferredCommentIds: ["outcome-comment"],
+      queuedCommentIds: ["outcome-comment"],
+    })];
+    const transaction = createFakeTransaction({
+      findNextDeferredWake: vi.fn(async () => queue.shift() ?? null),
+      getCommentSelfAuthorship: vi.fn(async () => ({ allSelfAuthored: true })),
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction, ISSUE, { ...RUN, status: "succeeded" }),
+      recovery: createFakeRecovery(),
+    });
+
+    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
+
+    expect(transaction.cancelDeferredWake).toHaveBeenCalledTimes(1);
+    expect(transaction.finalizePromotedWake).not.toHaveBeenCalled();
+    expect(transaction.queueImmediateRecoveryRun).not.toHaveBeenCalled();
+    expect(result.outcome.kind).toBe("released");
+  });
+
   it("reopens a completed task before promoting its assignee's human follow-up", async () => {
     const queue = [wakeCandidate({
       agentId: ISSUE.assigneeAgentId!,

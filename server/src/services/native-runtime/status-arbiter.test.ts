@@ -62,14 +62,13 @@ describe("native status authority", () => {
       reasonCode: "change_required_but_missing",
       effects: [expect.objectContaining({ kind: "record_finalization_error", cause: "change_required_but_missing" })],
     });
-    expect(arbitrate({
-      assessment: yielded,
-      terminalState: "failed",
-      honestyFailure: {
-        reasonCode: "no_output",
-        message: "The run finished without a result, diff, or pull request, so it is failed instead of succeeded.",
-      },
-    }).effects.some((effect) => effect.kind === "schedule_retry" || effect.kind === "enqueue_continuation")).toBe(false);
+    for (const reasonCode of ["no_output", "no_changes_produced", "shell_unavailable"]) {
+      expect(arbitrate({
+        assessment: { ...yielded, objectiveSatisfied: true, reportedDisposition: "done" },
+        terminalState: "failed",
+        honestyFailure: { reasonCode, message: reasonCode },
+      }).effects.some((effect) => effect.kind === "schedule_retry" || effect.kind === "enqueue_continuation")).toBe(false);
+    }
     expect(arbitrate({
       assessment: yielded,
       openPullRequestUrl: "https://github.com/acme/repo/pull/9",

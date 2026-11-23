@@ -1011,6 +1011,36 @@ describe("agent routes adapter validation", () => {
     expect(mockAgentService.update).not.toHaveBeenCalled();
   });
 
+  it("keeps timeoutSeconds and maxIterations set through the agent config API", async () => {
+    mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: true });
+    const existing = await mockAgentService.getById();
+    mockAgentService.getById.mockResolvedValue({
+      ...existing,
+      adapterType: "paperclip_runner",
+      adapterConfig: { provider: "codex", model: "gpt-5.4" },
+    });
+    const app = await createApp();
+    const response = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch("/api/agents/11111111-1111-4111-8111-111111111111")
+      .send({ adapterConfig: { timeoutSeconds: 600, maxIterations: 40 } }));
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const saved = mockAgentService.update.mock.calls.at(-1)?.[1].adapterConfig as Record<string, unknown>;
+    expect(saved).toMatchObject({
+      provider: "codex",
+      model: "gpt-5.4",
+      timeoutSeconds: 600,
+      maxIterations: 40,
+    });
+    const { resolveAgentAdapterRunBudget, resolveHeartbeatRunTimeoutPolicy } = await import("../services/heartbeat-stop-metadata.js");
+    const budget = resolveAgentAdapterRunBudget([saved]);
+    expect(budget).toMatchObject({ timeoutSec: 600, maxIterations: 40, maxRuntimeMs: 600_000 });
+    expect(resolveHeartbeatRunTimeoutPolicy("paperclip_runner", saved)).toEqual({
+      effectiveTimeoutSec: 600,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+  });
+
   it("allows an explicit Dot to Codex change without enabling other native providers", async () => {
     mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: false, enableOpenAiDot: true });
     mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner", adapterConfig: { provider: "openai_dot", allowUnmeteredProvider: true } });
