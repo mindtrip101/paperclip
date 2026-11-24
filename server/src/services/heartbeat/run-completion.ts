@@ -432,7 +432,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         errorMessage: adapterResult.errorMessage,
         summary: adapterResult.summary,
         semanticResultPresent: Boolean(adapterResult.nativeFinalization),
-        producedChange: !exitMissing,
+        producedChange: false,
         changeRequired: false,
       });
       if (honest.outcome === "failed") {

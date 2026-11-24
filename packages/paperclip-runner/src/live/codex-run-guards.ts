@@ -79,9 +79,20 @@ export function classifyWorkspaceFailure(message: string): WorkspaceFailureKind 
   return null;
 }
 
+export function classifyShellSpawnFailure(message: string): boolean {
+  const text = message.toLowerCase();
+  return /shell binary lookup/.test(text)
+    || /shell_unavailable/.test(text)
+    || /unable to spawn (?:a )?shell/.test(text)
+    || /spawn\s+\S*(?:zsh|bash|sh)\s+enoent/.test(text)
+    || (/enoent/.test(text) && /\b(shell|zsh|bash)\b/.test(text));
+}
+
 export const HONEST_RUN_FAILURE_CODES = [
   "no_output",
+  "no_changes_produced",
   "change_required_but_missing",
+  "shell_unavailable",
   "workspace_clone_failed",
   "workspace_authentication_failed",
   "workspace_push_failed",
@@ -136,6 +147,14 @@ export function classifyHonestRunOutcome(input: {
       message: `The run failed to ${action}: ${text}`,
     };
   }
+  const shellFailure = texts.find((text) => classifyShellSpawnFailure(text));
+  if (shellFailure && !input.producedChange && !isOpenPullRequestUrl(input.pullRequestUrl)) {
+    return {
+      outcome: "failed",
+      reasonCode: "shell_unavailable",
+      message: `shell_unavailable: the run could not start a shell. ${shellFailure}`,
+    };
+  }
   if (isOpenPullRequestUrl(input.pullRequestUrl) || input.producedChange) {
     return { outcome: "succeeded", reasonCode: null, message: null };
   }
@@ -146,8 +165,8 @@ export function classifyHonestRunOutcome(input: {
   if (input.changeRequired && !waiting) {
     return {
       outcome: "failed",
-      reasonCode: "change_required_but_missing",
-      message: "The run ended without a repository change or pull request, but this task required a change.",
+      reasonCode: "no_changes_produced",
+      message: "no_changes_produced: the run ended without a diff on the workspace branch or an open pull request.",
     };
   }
   const exitMissing = input.exitCode === undefined || input.exitCode === null;

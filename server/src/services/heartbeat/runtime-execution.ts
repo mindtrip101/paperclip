@@ -63,7 +63,8 @@ import {
 import { PROVIDER_TRACE_MAX_BYTES } from "../provider-trace-store.js";
 import type { AdapterExecutionResult } from "../../adapters/index.js";
 import { createLocalAgentJwt } from "../../agent-auth-jwt.js";
-import { parseObject, asNumber } from "../../adapters/utils.js";
+import { parseObject } from "../../adapters/utils.js";
+import { resolveAgentAdapterRunBudget } from "../heartbeat-stop-metadata.js";
 import { NativeRunnerOwnershipUnverifiedError } from "../native-runtime/native-runner-ownership.js";
 import {
   ensureGitWorktreeBranchCoherent,
@@ -589,7 +590,10 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               getFreshSessionHandoff: getNativeFreshSessionHandoff,
               refreshTools: context.refreshTools === true,
               conversationMode: isConversation(issueContext),
-              turnTimeoutMs: Math.max(0, asNumber(runtimeConfig.timeoutSec, 0)) * 1_000,
+              turnTimeoutMs: resolveAgentAdapterRunBudget([
+                runtimeConfig,
+                parseObject(agent.adapterConfig),
+              ]).maxRuntimeMs,
               runnerInstanceId: nativeRunnerInstanceId,
               leaseOwner: runOptions.nativeLeaseOwner,
               restartRecovery: runOptions.nativeRestartRecovery,

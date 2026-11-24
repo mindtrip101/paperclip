@@ -23,6 +23,8 @@ import {
   isHonestRunFailureCode,
   loadCodexRunLimits,
   readGitHead,
+  readIssueWorkspaceRepoUrl,
+  shellSpawnFailureText,
   type CodexRunLimits,
 } from "./codex-run-guards.js";
 import { isCloudManagedInstance } from "../cloud-instance.js";
@@ -6412,6 +6414,8 @@ export function nativeSessionFailureSourceCode(
   | "max_iterations_exceeded"
   | "pull_request_open"
   | "no_output"
+  | "no_changes_produced"
+  | "shell_unavailable"
   | "change_required_but_missing"
   | "workspace_clone_failed"
   | "workspace_authentication_failed"
@@ -6500,6 +6504,8 @@ export function nativeSessionFailureSourceCode(
   }
   if (/max_iterations_exceeded/i.test(message)) return "max_iterations_exceeded";
   if (/pull_request_open/i.test(message)) return "pull_request_open";
+  if (/no_changes_produced/i.test(message)) return "no_changes_produced";
+  if (/shell_unavailable|shell binary lookup/i.test(message)) return "shell_unavailable";
   if (/change_required_but_missing/i.test(message)) return "change_required_but_missing";
   if (/workspace_clone_failed|failed to clone the repository/i.test(message)) return "workspace_clone_failed";
   if (/workspace_authentication_failed|failed to authenticate/i.test(message)) return "workspace_authentication_failed";
@@ -9823,6 +9829,17 @@ async function executePaperclipNativeSessionWithinScope(
     ? await inspectRepositoryChange(input.execution.workspace.cwd, repositoryBaseHead)
     : { available: false, producedChange: false, error: null as string | null };
   const continuation = native.result?.continuation;
+  const workspaceRepoUrl = input.execution.provider.kind === "codex"
+    ? (input.execution.workspace.repoUrl?.trim()
+      || await readIssueWorkspaceRepoUrl(
+        input.db,
+        input.execution.binding.companyId,
+        input.execution.binding.issueId,
+      ))
+    : null;
+  const shellEvidence = input.execution.provider.kind === "codex"
+    ? shellSpawnFailureText(native.result) ?? shellSpawnFailureText(native.terminal)
+    : null;
   const runnerHonesty = input.execution.provider.kind === "codex"
     ? classifyHonestRunOutcome({
       exitCode: native.terminal.runTerminalState === "succeeded" ? 0 : 1,
@@ -9832,13 +9849,13 @@ async function executePaperclipNativeSessionWithinScope(
         ? String(continuation.kind ?? "")
         : null,
       producedChange: repositoryInspection.producedChange || Boolean(codexRunLimits.openPullRequestUrl),
-      changeRequired: repositoryInspection.available && codingChangeRequired({
+      changeRequired: codingChangeRequired({
         workMode: input.execution.task.workMode,
-        repoUrl: input.execution.workspace.repoUrl,
+        repoUrl: workspaceRepoUrl,
       }),
       pullRequestUrl: codexRunLimits.openPullRequestUrl,
       workspaceErrors: repositoryInspection.error ? [repositoryInspection.error] : [],
-      summary: native.result?.summary ?? null,
+      summary: [native.result?.summary, shellEvidence].filter((value): value is string => Boolean(value)).join("\n") || null,
     })
     : null;
   if (runnerHonesty?.outcome === "failed" && native.terminal.runTerminalState === "succeeded") {
@@ -9853,7 +9870,10 @@ async function executePaperclipNativeSessionWithinScope(
   }
   if (runnerHonesty) {
     await input.db.update(heartbeatRuns).set({
-      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ runnerHonesty })}::jsonb`,
+      resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+        runnerHonesty,
+        ...(runnerHonesty.outcome === "failed" ? { objectiveSatisfied: false } : {}),
+      })}::jsonb`,
       ...(runnerHonesty.outcome === "failed"
         ? { error: runnerHonesty.message, errorCode: runnerHonesty.reasonCode }
         : {}),

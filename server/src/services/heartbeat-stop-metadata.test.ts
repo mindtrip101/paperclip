@@ -3,6 +3,7 @@ import { resolveAdapterExecutionTargetTimeout } from "@paperclipai/adapter-utils
 import {
   buildHeartbeatRunStopMetadata,
   mergeHeartbeatRunStopMetadata,
+  resolveAgentAdapterRunBudget,
   resolveHeartbeatRunTimeoutPolicy,
 } from "./heartbeat-stop-metadata.js";
 
@@ -23,6 +24,26 @@ describe("heartbeat stop metadata", () => {
         timeoutSource: "default",
       });
     }
+  });
+
+  it("binds timeoutSeconds from the agent adapter config when timeoutSec is absent", () => {
+    expect(resolveHeartbeatRunTimeoutPolicy("paperclip_runner", {
+      timeoutSeconds: 600,
+      maxIterations: 40,
+    })).toEqual({
+      effectiveTimeoutSec: 600,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+    expect(resolveAgentAdapterRunBudget([
+      { timeoutSec: 0 },
+      { provider: "codex", timeoutSeconds: 600, maxIterations: 40 },
+    ])).toMatchObject({
+      timeoutSec: 600,
+      timeoutKeyPresent: true,
+      maxIterations: 40,
+      maxRuntimeMs: 600_000,
+    });
   });
 
   it("records configured timeout policy and timeout stop reason", () => {

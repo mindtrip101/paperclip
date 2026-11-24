@@ -89,15 +89,23 @@ describe("codex run guards", () => {
       changeRequired: true,
     })).toMatchObject({
       outcome: "failed",
-      reasonCode: "change_required_but_missing",
+      reasonCode: "no_changes_produced",
     });
+    expect(classifyHonestRunOutcome({
+      exitCode: 0,
+      semanticResultPresent: true,
+      reportedDisposition: "done",
+      producedChange: false,
+      changeRequired: true,
+      summary: "The shell binary lookup is failing. Let me try with the zsh path I know exists.",
+    })).toMatchObject({ outcome: "failed", reasonCode: "shell_unavailable" });
     expect(classifyHonestRunOutcome({
       exitCode: 0,
       semanticResultPresent: true,
       reportedDisposition: "yielded",
       producedChange: false,
       changeRequired: true,
-    })).toMatchObject({ outcome: "failed", reasonCode: "change_required_but_missing" });
+    })).toMatchObject({ outcome: "failed", reasonCode: "no_changes_produced" });
     expect(classifyHonestRunOutcome({
       exitCode: 0,
       semanticResultPresent: true,
