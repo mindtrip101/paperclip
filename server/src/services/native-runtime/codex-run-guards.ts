@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { and, eq, notInArray } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { resolveAgentAdapterRunBudget } from "../heartbeat-stop-metadata.js";
-import { agents, issues, issueWorkProducts, projectWorkspaces, type Db } from "@paperclipai/db";
+import { agents, issueComments, issues, issueWorkProducts, projectWorkspaces, type Db } from "@paperclipai/db";
 
 // Kept in this package so the server typecheck root stays inside server/src.
 // The runner copy in packages/paperclip-runner/src/live/codex-run-guards.ts is the
@@ -200,19 +200,67 @@ export async function readIssueWorkspaceRepoUrl(
   return repoUrl ? repoUrl : null;
 }
 
+function normalizeReportedPullRequestUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    if (!/^\/[\w.-]+\/[\w.-]+\/pulls?\/[1-9]\d*\/?$/.test(url.pathname)) return null;
+    return `${url.origin}${url.pathname.replace(/\/$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+function reportedPullRequestUrls(text: string, open: boolean): string[] {
+  const urls: string[] = [];
+  for (const line of text.split("\n")) {
+    const report = line.replace(/https:\/\/[^\s<>"'`]+/g, "");
+    if (/\b(?:not|never|will|would|could|should|example|failed|unable|cannot|please|if)\b|\b\w+n['’]t\b/i.test(report)) continue;
+    const terminal = /\b(?:closed|merged|archived)\b/i.test(report);
+    if (open === terminal) continue;
+    if (open && !/\bpr_url["']?\s*[:=]|\b(?:opened|created)\b.{0,60}\b(?:PR|pull request)\b|\b(?:PR|pull request)\b.{0,60}\b(?:opened|created|is open|remains open)\b|^\s*(?:[-*]\s*)?open (?:PR|pull request)\s*:/i.test(report)) continue;
+    for (const match of line.matchAll(/https:\/\/[^\s<>"'`]+/g)) {
+      const url = normalizeReportedPullRequestUrl(match[0].replace(/[)\]},.;:!?]+$/, ""));
+      if (url) urls.push(url);
+    }
+  }
+  return urls;
+}
+
 export async function readIssueOpenPullRequestUrl(
   db: Db,
   companyId: string,
   issueId: string,
+  summary?: string | null,
 ): Promise<string | null> {
-  const [row] = await db.select({ url: issueWorkProducts.url }).from(issueWorkProducts).where(and(
+  const products = await db.select({ url: issueWorkProducts.url, status: issueWorkProducts.status }).from(issueWorkProducts).where(and(
     eq(issueWorkProducts.companyId, companyId),
     eq(issueWorkProducts.issueId, issueId),
     eq(issueWorkProducts.type, "pull_request"),
-    notInArray(issueWorkProducts.status, CLOSED_PULL_REQUEST_STATUSES),
-  )).limit(1);
-  const url = row?.url?.trim();
-  return url ? url : null;
+  ));
+  const open = products.find((row) => !CLOSED_PULL_REQUEST_STATUSES.includes(row.status) && row.url?.trim());
+  if (open?.url) return open.url.trim();
+  const closed = new Set(products.flatMap((row) => {
+    const url = row.url && normalizeReportedPullRequestUrl(row.url.trim());
+    return url && CLOSED_PULL_REQUEST_STATUSES.includes(row.status) ? [url] : [];
+  }));
+  const readReport = (text: string) => {
+    for (const url of reportedPullRequestUrls(text, false)) closed.add(url);
+    return reportedPullRequestUrls(text, true).find((url) => !closed.has(url));
+  };
+  const reported = readReport(summary ?? "");
+  if (reported) return reported;
+  const comments = await db.select({ body: issueComments.body }).from(issueComments).where(and(
+    eq(issueComments.companyId, companyId),
+    eq(issueComments.issueId, issueId),
+    isNull(issueComments.deletedAt),
+    eq(issueComments.origin, "comment"),
+  )).orderBy(desc(issueComments.createdAt)).limit(20);
+  for (const comment of comments) {
+    const url = readReport(comment.body);
+    if (url) return url;
+  }
+  return null;
 }
 
 export async function readGitHead(cwd: string | null | undefined): Promise<string | null> {

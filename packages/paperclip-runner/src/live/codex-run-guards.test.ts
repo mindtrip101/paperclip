@@ -36,13 +36,19 @@ describe("codex run guards", () => {
     });
   });
 
-  it("stops a run that already has an open pull request", () => {
+  it.each([
+    "https://github.com/acme/repo/pull/4",
+    "https://forgejo.example/acme/repo/pulls/4",
+  ])("accepts and stops for an open pull request: %s", (pullRequestUrl) => {
     expect(observeCodexStep({
       completedSteps: 0,
       maxIterations: 8,
-      pullRequestUrl: "https://github.com/acme/repo/pull/4",
+      pullRequestUrl,
       stepKind: "commandExecution",
     })).toMatchObject({ stop: true, reasonCode: "pull_request_open", completedSteps: 0 });
+    expect(classifyHonestRunOutcome({
+      semanticResultPresent: true, producedChange: false, changeRequired: true, pullRequestUrl,
+    })).toMatchObject({ outcome: "succeeded", reasonCode: null });
   });
 
   it("requires approval for automatic same-agent continuation unless the flag is on", () => {

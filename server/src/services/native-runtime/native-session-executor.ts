@@ -23,6 +23,7 @@ import {
   isHonestRunFailureCode,
   loadCodexRunLimits,
   readGitHead,
+  readIssueOpenPullRequestUrl,
   readIssueWorkspaceRepoUrl,
   shellSpawnFailureText,
   type CodexRunLimits,
@@ -9840,6 +9841,14 @@ async function executePaperclipNativeSessionWithinScope(
   const shellEvidence = input.execution.provider.kind === "codex"
     ? shellSpawnFailureText(native.result) ?? shellSpawnFailureText(native.terminal)
     : null;
+  const openPullRequestUrl = input.execution.provider.kind === "codex"
+    ? await readIssueOpenPullRequestUrl(
+      input.db,
+      input.execution.binding.companyId,
+      input.execution.binding.issueId,
+      native.result?.summary,
+    )
+    : null;
   const runnerHonesty = input.execution.provider.kind === "codex"
     ? classifyHonestRunOutcome({
       exitCode: native.terminal.runTerminalState === "succeeded" ? 0 : 1,
@@ -9848,12 +9857,12 @@ async function executePaperclipNativeSessionWithinScope(
       continuationKind: continuation && typeof continuation === "object" && "kind" in continuation
         ? String(continuation.kind ?? "")
         : null,
-      producedChange: repositoryInspection.producedChange || Boolean(codexRunLimits.openPullRequestUrl),
+      producedChange: repositoryInspection.producedChange,
       changeRequired: codingChangeRequired({
         workMode: input.execution.task.workMode,
         repoUrl: workspaceRepoUrl,
       }),
-      pullRequestUrl: codexRunLimits.openPullRequestUrl,
+      pullRequestUrl: openPullRequestUrl,
       workspaceErrors: repositoryInspection.error ? [repositoryInspection.error] : [],
       summary: [native.result?.summary, shellEvidence].filter((value): value is string => Boolean(value)).join("\n") || null,
     })
