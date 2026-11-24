@@ -1425,7 +1425,10 @@ export async function finalizeNativeRun(input: {
     const decisionAssessment = storedHonesty?.outcome === "failed"
       ? { ...assessment, objectiveSatisfied: false, objectiveClaimSatisfied: false, allCriteriaSatisfied: false }
       : assessment;
-    const openPullRequestUrl = await readIssueOpenPullRequestUrl(input.db, run.companyId, authoritativeIssue.id);
+    const openPullRequestUrl = await readIssueOpenPullRequestUrl(
+      input.db, run.companyId, authoritativeIssue.id,
+      typeof result.summary === "string" ? result.summary : null,
+    );
     const proposedDecision = resolveNativeFinalizerStatus({
       honestyFailure: storedHonesty?.outcome === "failed" && storedHonesty.reasonCode && storedHonesty.message
         ? { reasonCode: storedHonesty.reasonCode, message: storedHonesty.message }
