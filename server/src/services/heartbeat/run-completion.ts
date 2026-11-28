@@ -16,7 +16,7 @@ import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execut
 import { isWorkspaceGitScanError } from "../workspace-git-operation-scheduler.js";
 import { and, eq, sql } from "drizzle-orm";
 import { heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
-import { classifyHonestRunOutcome, runnerHonestyFrom } from "../native-runtime/codex-run-guards.js";
+import { classifyHonestRunOutcome, runnerHonestyFrom, unapprovedAutomationFollowUpAfterSuccess } from "../native-runtime/codex-run-guards.js";
 import { HttpError } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { normalizeResponsibleUserDenialCode } from "../responsible-user-denial-run-outcomes.js";
@@ -744,13 +744,17 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     );
 
     const finalizedRun = persistedRun ?? (await getRun(run.id));
+    const preserveSucceededAssignment = outcome === "failed" && finalizedRun
+      ? await unapprovedAutomationFollowUpAfterSuccess(db, finalizedRun)
+      : false;
     const settleAgent = () => finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
       keepIdleOnFailure:
         outcome === "failed" &&
+        (preserveSucceededAssignment ||
         ((finalizedRun
           ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota"
           : runErrorCode === "provider_quota") ||
-          isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
+          isWorkspaceSyncConflictFailure(adapterResult.errorMessage))),
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
     });
     if (finalizedRun) {

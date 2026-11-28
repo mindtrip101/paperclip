@@ -2,6 +2,10 @@ import { authorizationService } from "../authorization.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { sameAgentCommentShouldWake } from "../issue-comment-wakeup.js";
+import {
+  assigneeCompletionCommentEnqueuesAutomation,
+  automaticSameAgentContinuationEnabled,
+} from "../native-runtime/codex-run-guards.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
@@ -2199,12 +2203,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     if (!agent) throw notFound("Agent not found");
     if (
       (reason === "issue_commented" || enrichedContextSnapshot.wakeReason === "issue_commented") &&
-      wakeCommentId &&
-      opts.requestedByActorType !== "user"
+      wakeCommentId
     ) {
       const [comment] = await db.select({
         authorAgentId: issueComments.authorAgentId,
         createdByRunId: issueComments.createdByRunId,
+        body: issueComments.body,
       }).from(issueComments).where(and(
         eq(issueComments.id, wakeCommentId),
         eq(issueComments.companyId, agent.companyId),
@@ -2215,7 +2219,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           eq(heartbeatRuns.companyId, agent.companyId),
         )).limit(1)
         : [];
-      if (comment && !sameAgentCommentShouldWake({
+      if (comment && !assigneeCompletionCommentEnqueuesAutomation({
+        automatic: automaticSameAgentContinuationEnabled(
+          parseObject(agent.adapterConfig),
+          process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION,
+        ),
+        commentBody: comment.body,
+        authorAgentId: comment.authorAgentId,
+        createdByRunAgentId: sourceRun?.agentId ?? null,
+        targetAgentId: agentId,
+      })) return null;
+      if (comment && opts.requestedByActorType !== "user" && !sameAgentCommentShouldWake({
         targetAgentId: agentId,
         authorAgentId: comment.authorAgentId,
         createdByRunAgentId: sourceRun?.agentId ?? null,

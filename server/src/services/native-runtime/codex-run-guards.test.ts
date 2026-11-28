@@ -1,10 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect, pgTable, text } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
-import { classifyHonestRunOutcome, readIssueOpenPullRequestUrl } from "./codex-run-guards.js";
+import {
+  assigneeCompletionCommentEnqueuesAutomation,
+  automaticSameAgentContinuationEnabled,
+  classifyHonestRunOutcome,
+  readIssueOpenPullRequestUrl,
+  sameAgentFollowUpAction,
+  unapprovedFollowUpPreservesSucceededAssignment,
+} from "./codex-run-guards.js";
 
 vi.mock("@paperclipai/db", () => ({
-  agents: {}, issues: {}, projectWorkspaces: {},
+  agents: {}, issues: {}, projectWorkspaces: {}, heartbeatRuns: {}, agentWakeupRequests: {},
   issueWorkProducts: pgTable("issue_work_products", {
     companyId: text("company_id"), issueId: text("issue_id"), type: text("type"),
     status: text("status"), url: text("url"),
@@ -103,5 +110,84 @@ describe("reported pull request evidence", () => {
       expect(await assess(summary, [], [`PR is closed: ${forgejo}`, `Opened PR: ${forgejo}`]))
         .toMatchObject({ outcome: "failed", reasonCode: "no_changes_produced" });
     }
+  });
+});
+
+const pullRequest = "https://github.com/acme/repo/pull/42";
+
+describe("post-success same-agent follow-up", () => {
+  it("does not enqueue automation for the assignee completion comment when the flag is unset", () => {
+    const commentBody = `Assignment succeeded.\npr_url=${pullRequest}`;
+    expect(assigneeCompletionCommentEnqueuesAutomation({
+      automatic: automaticSameAgentContinuationEnabled(undefined, undefined),
+      commentBody,
+      authorAgentId: "coder",
+      createdByRunAgentId: "coder",
+      targetAgentId: "coder",
+    })).toBe(false);
+    expect(assigneeCompletionCommentEnqueuesAutomation({
+      automatic: false,
+      commentBody,
+      authorAgentId: "reviewer",
+      createdByRunAgentId: "reviewer",
+      targetAgentId: "coder",
+    })).toBe(true);
+  });
+
+  it("does not start same_agent for a success move to in_review when the flag is unset", () => {
+    expect(sameAgentFollowUpAction({
+      automatic: false,
+      continuationKind: "same_agent",
+      successStatus: "in_review",
+    })).toBe("stop");
+  });
+
+  it("does not start same_agent when an open pull request is already visible", () => {
+    expect(sameAgentFollowUpAction({
+      automatic: true,
+      continuationKind: "same_agent",
+      openPullRequestUrl: pullRequest,
+      successStatus: "in_progress",
+    })).toBe("stop");
+    expect(sameAgentFollowUpAction({
+      automatic: false,
+      continuationKind: "same_agent",
+      reportedText: `pr_url=${pullRequest}`,
+    })).toBe("stop");
+  });
+
+  it("does not reconcile a failed unapproved follow-up after the assignment succeeded", () => {
+    expect(unapprovedFollowUpPreservesSucceededAssignment({
+      automatic: false,
+      invocationSource: "automation",
+      continuationKind: "same_agent",
+      wakeReason: "issue_status_changed",
+      assignmentSucceeded: true,
+    })).toBe(true);
+    expect(unapprovedFollowUpPreservesSucceededAssignment({
+      automatic: false,
+      invocationSource: "automation",
+      wakeReason: "issue_commented",
+      assignmentSucceeded: true,
+    })).toBe(true);
+    expect(unapprovedFollowUpPreservesSucceededAssignment({
+      automatic: true,
+      invocationSource: "automation",
+      continuationKind: "same_agent",
+      assignmentSucceeded: true,
+    })).toBe(false);
+    expect(unapprovedFollowUpPreservesSucceededAssignment({
+      automatic: false,
+      invocationSource: "on_demand",
+      continuationKind: "same_agent",
+      assignmentSucceeded: true,
+    })).toBe(false);
+  });
+
+  it("keeps automatic same-agent continuation off by default", () => {
+    expect(automaticSameAgentContinuationEnabled(undefined, undefined)).toBe(false);
+    expect(automaticSameAgentContinuationEnabled({}, "")).toBe(false);
+    expect(automaticSameAgentContinuationEnabled(null, undefined)).toBe(false);
+    expect(automaticSameAgentContinuationEnabled({ automaticSameAgentContinuation: true }, undefined)).toBe(true);
   });
 });
