@@ -34,6 +34,7 @@ import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/reco
 import { classifyContinuationFailure } from "../../../services/recovery/service.js";
 import { issueService } from "../../../services/issues.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
+import { unapprovedAutomationFollowUpAfterSuccess } from "../../../services/native-runtime/codex-run-guards.js";
 import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
 import { withRecoveryContext } from "../../../services/recovery/status-only-context.js";
 import { parseIssueExecutionState } from "../../../services/issue-execution-policy.js";
@@ -1228,6 +1229,19 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
             postCommitEffects: [],
             run: runSnapshot,
           };
+        }
+
+        if (
+          ["failed", "timed_out", "interrupted", "cancelled"].includes(run.status) &&
+          issueRow.assigneeAgentId === run.agentId &&
+          await unapprovedAutomationFollowUpAfterSuccess(tx, run)
+        ) {
+          await tx.update(agents).set({ status: "idle", errorReason: null, updatedAt: input.now }).where(and(
+            eq(agents.id, run.agentId),
+            eq(agents.companyId, input.companyId),
+            eq(agents.status, "error"),
+          ));
+          return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
         }
 
         if (await recordNativeTerminalRecoveryIfNeeded(tx, run, issueRow, input.now)) {

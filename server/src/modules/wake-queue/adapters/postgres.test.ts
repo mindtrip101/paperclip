@@ -606,6 +606,52 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
   });
 
+  it("does not reconcile a failed unapproved follow-up after the assignment succeeded", async () => {
+    const previous = process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION;
+    delete process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION;
+    try {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent({ companyId });
+      const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_review" });
+      const succeededId = await seedRun({
+        companyId, agentId, status: "succeeded", contextSnapshot: { issueId },
+      });
+      await db.update(heartbeatRuns).set({
+        runtimeMode: "native",
+        nativeIssueId: issueId,
+        resultJson: { runnerHonesty: { outcome: "succeeded", reasonCode: null, message: null } },
+      }).where(eq(heartbeatRuns.id, succeededId));
+      const runId = await seedRun({
+        companyId, agentId, status: "failed", contextSnapshot: {
+          issueId,
+          continuationKind: "same_agent",
+          wakeReason: "issue_commented",
+        },
+      });
+      await db.update(heartbeatRuns).set({
+        runtimeMode: "native",
+        invocationSource: "automation",
+        nativeIssueId: issueId,
+        error: "Native session failed",
+      }).where(eq(heartbeatRuns.id, runId));
+      await db.update(agents).set({ status: "error", errorReason: "Native session failed" }).where(eq(agents.id, agentId));
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+      const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+      const result = await adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async () => {
+        throw new Error("must not start another turn");
+      });
+      expect(result.outcome.kind).toBe("released");
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe("in_review");
+      expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
+      expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0]).toMatchObject({
+        status: "idle", errorReason: null,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION;
+      else process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION = previous;
+    }
+  });
+
   it.each(["in_progress", "blocked"])("preserves recovery ownership and queued messages when a native task fails from %s", async (status) => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });

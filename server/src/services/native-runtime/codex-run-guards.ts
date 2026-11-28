@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { resolveAgentAdapterRunBudget } from "../heartbeat-stop-metadata.js";
-import { agents, issueComments, issues, issueWorkProducts, projectWorkspaces, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, agents, heartbeatRuns, issueComments, issues, issueWorkProducts, projectWorkspaces, type Db } from "@paperclipai/db";
 
 // Kept in this package so the server typecheck root stays inside server/src.
 // The runner copy in packages/paperclip-runner/src/live/codex-run-guards.ts is the
@@ -157,6 +157,68 @@ export function sameAgentContinuationDisposition(input: {
   return "enqueue";
 }
 
+export function textReportsOpenPullRequest(text: string | null | undefined): boolean {
+  return reportedPullRequestUrls(text ?? "", true).length > 0;
+}
+
+/**
+ * A succeeded assignment, an in_review success, or a reported pull request
+ * must not start another same-agent turn while automatic continuation is unset.
+ * An open pull request stops continuation even when the flag is on.
+ */
+export function sameAgentFollowUpAction(input: {
+  automatic: boolean;
+  continuationKind?: string | null;
+  openPullRequestUrl?: string | null;
+  reportedText?: string | null;
+  assignmentSucceeded?: boolean;
+  successStatus?: string | null;
+}): "stop" | "require_approval" | "enqueue" {
+  if (isOpenPullRequestUrl(input.openPullRequestUrl) || textReportsOpenPullRequest(input.reportedText)) return "stop";
+  if (!input.automatic && (input.assignmentSucceeded === true || input.successStatus === "in_review")) return "stop";
+  return sameAgentContinuationDisposition({
+    continuationKind: input.continuationKind ?? "same_agent",
+    automatic: input.automatic,
+  }) === "require_approval" ? "require_approval" : "enqueue";
+}
+
+/** The assignee's own completion receipt must not enqueue automation while the flag is unset. */
+export function assigneeCompletionCommentEnqueuesAutomation(input: {
+  automatic: boolean;
+  commentBody?: string | null;
+  authorAgentId: string | null;
+  createdByRunAgentId: string | null;
+  targetAgentId: string;
+}): boolean {
+  const own = (input.authorAgentId != null && input.authorAgentId === input.targetAgentId)
+    || (input.createdByRunAgentId != null && input.createdByRunAgentId === input.targetAgentId);
+  if (!own || input.automatic) return true;
+  return !textReportsOpenPullRequest(input.commentBody);
+}
+
+export function nativeAssignmentSucceeded(run: { status?: string | null; resultJson?: unknown } | null | undefined): boolean {
+  if (!run) return false;
+  const honesty = runnerHonestyFrom(run.resultJson);
+  if (honesty?.outcome === "failed") return false;
+  if (honesty?.outcome === "succeeded") return true;
+  return run.status === "succeeded";
+}
+
+export function unapprovedFollowUpPreservesSucceededAssignment(input: {
+  automatic: boolean;
+  invocationSource?: string | null;
+  continuationKind?: string | null;
+  wakeReason?: string | null;
+  continuationApproved?: boolean;
+  assignmentSucceeded?: boolean;
+}): boolean {
+  if (input.automatic || input.continuationApproved || !input.assignmentSucceeded) return false;
+  if (input.invocationSource !== "automation") return false;
+  return input.continuationKind === "same_agent"
+    || input.wakeReason === "issue_commented"
+    || input.wakeReason === "issue_status_changed";
+}
+
 const execFileAsync = promisify(execFile);
 const CLOSED_PULL_REQUEST_STATUSES = ["merged", "closed", "archived", "failed"];
 
@@ -308,4 +370,78 @@ export function runnerHonestyFrom(value: unknown): HonestRunAssessment | null {
     reasonCode: typeof reasonCode === "string" ? reasonCode as HonestRunAssessment["reasonCode"] : null,
     message: typeof message === "string" ? message : null,
   };
+}
+
+function followUpText(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function followUpRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/**
+ * A failed automation follow-up that was not approved must not overwrite an
+ * assignment that already succeeded. The flag still defaults to off.
+ */
+export async function unapprovedAutomationFollowUpAfterSuccess(
+  db: Db,
+  run: {
+    id: string;
+    companyId: string;
+    agentId: string;
+    invocationSource: string;
+    contextSnapshot?: unknown;
+    wakeupRequestId?: string | null;
+  },
+): Promise<boolean> {
+  const [agent] = await db.select({ adapterConfig: agents.adapterConfig }).from(agents).where(and(
+    eq(agents.id, run.agentId),
+    eq(agents.companyId, run.companyId),
+  )).limit(1);
+  const context = followUpRecord(run.contextSnapshot);
+  const nested = followUpRecord(context._paperclipWakeContext);
+  let continuationKind = followUpText(context.continuationKind) ?? followUpText(nested.continuationKind);
+  let wakeReason = followUpText(context.wakeReason) ?? followUpText(nested.wakeReason);
+  const continuationApproved = context.continuationApproved === true
+    || typeof context.interactionId === "string"
+    || typeof nested.interactionId === "string";
+  if (run.wakeupRequestId && (!continuationKind || !wakeReason)) {
+    const [wake] = await db.select({
+      reason: agentWakeupRequests.reason,
+      payload: agentWakeupRequests.payload,
+    }).from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.id, run.wakeupRequestId),
+      eq(agentWakeupRequests.companyId, run.companyId),
+    )).limit(1);
+    const payload = followUpRecord(wake?.payload);
+    const wakeContext = followUpRecord(payload._paperclipWakeContext);
+    continuationKind ??= followUpText(payload.continuationKind) ?? followUpText(wakeContext.continuationKind);
+    wakeReason ??= followUpText(wake?.reason) ?? followUpText(wakeContext.wakeReason);
+  }
+  const issueId = followUpText(context.issueId) ?? followUpText(nested.issueId) ?? followUpText(context.taskId);
+  if (!issueId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(issueId)) return false;
+  const prior = await db.select({
+    status: heartbeatRuns.status,
+    resultJson: heartbeatRuns.resultJson,
+  }).from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.agentId, run.agentId),
+    sql`${heartbeatRuns.id} <> ${run.id}`,
+    or(
+      eq(heartbeatRuns.nativeIssueId, issueId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+    ),
+  )).limit(20);
+  return unapprovedFollowUpPreservesSucceededAssignment({
+    automatic: automaticSameAgentContinuationEnabled(
+      agent?.adapterConfig,
+      process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION,
+    ),
+    invocationSource: run.invocationSource,
+    continuationKind,
+    wakeReason,
+    continuationApproved,
+    assignmentSucceeded: prior.some((row) => nativeAssignmentSucceeded(row)),
+  });
 }

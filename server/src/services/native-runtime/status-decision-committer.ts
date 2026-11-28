@@ -49,8 +49,9 @@ import { issueService } from "../issues.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import {
   automaticSameAgentContinuationEnabled,
+  nativeAssignmentSucceeded,
   readIssueOpenPullRequestUrl,
-  sameAgentContinuationDisposition,
+  sameAgentFollowUpAction,
 } from "./codex-run-guards.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { buildIssueBlockersResolvedWakeIdempotencyKey } from "../issue-dependency-wakeups.js";
@@ -537,6 +538,7 @@ async function materializeDecisionEffect(input: {
   runId: string;
   decisionId: string;
   effect: NativeStatusEffect;
+  projectedStatus?: string | null;
   failpoint?: NativeStatusCommitFailpoint;
   preMaterializedEffects?: ReadonlyMap<string, NativeMaterializedStatusEffect>;
   /** Terminal heartbeat_runs rows this effect wrote. The caller emits agent.task_run for each, after its transaction commits. */
@@ -742,8 +744,43 @@ async function materializeDecisionEffect(input: {
     }
     if (effect.continuationKind === "monitor") throw new Error("Monitor delivery belongs to the issue monitor scheduler");
     if (effect.continuationKind === "same_agent") {
-      const openPullRequestUrl = await readIssueOpenPullRequestUrl(input.tx, input.companyId, input.issue.id);
-      if (openPullRequestUrl) {
+      const [sourceRun] = await input.tx.select({
+        status: heartbeatRuns.status,
+        resultJson: heartbeatRuns.resultJson,
+      }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, input.runId),
+        eq(heartbeatRuns.companyId, input.companyId),
+      )).limit(1);
+      const resultRecord = sourceRun?.resultJson && typeof sourceRun.resultJson === "object"
+        ? sourceRun.resultJson as Record<string, unknown>
+        : {};
+      const reportedText = [effect.summary, resultRecord.summary, resultRecord.message]
+        .filter((value): value is string => typeof value === "string")
+        .join("\n");
+      const openPullRequestUrl = await readIssueOpenPullRequestUrl(
+        input.tx, input.companyId, input.issue.id, reportedText,
+      );
+      const [agent] = await input.tx.select({ adapterConfig: agents.adapterConfig }).from(agents).where(and(
+        eq(agents.id, effect.agentId),
+        eq(agents.companyId, input.companyId),
+      )).limit(1);
+      const action = sameAgentFollowUpAction({
+        continuationKind: effect.continuationKind,
+        openPullRequestUrl,
+        reportedText,
+        assignmentSucceeded: nativeAssignmentSucceeded(sourceRun),
+        successStatus: input.projectedStatus ?? input.issue.status,
+        automatic: automaticSameAgentContinuationEnabled(
+          agent?.adapterConfig,
+          process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION,
+        ),
+      });
+      if (action === "stop") {
+        const stopped = openPullRequestUrl || reportedText.includes("pr_url")
+          ? "pull_request_open"
+          : input.projectedStatus === "in_review"
+            ? "success_in_review"
+            : "assignment_succeeded";
         return {
           effectKind: effect.kind,
           targetType: "issue",
@@ -751,22 +788,12 @@ async function materializeDecisionEffect(input: {
           payload: {
             continuationKind: effect.continuationKind,
             summary: effect.summary,
-            stopped: "pull_request_open",
-            pullRequestUrl: openPullRequestUrl,
+            stopped,
+            ...(openPullRequestUrl ? { pullRequestUrl: openPullRequestUrl } : {}),
           },
         };
       }
-      const [agent] = await input.tx.select({ adapterConfig: agents.adapterConfig }).from(agents).where(and(
-        eq(agents.id, effect.agentId),
-        eq(agents.companyId, input.companyId),
-      )).limit(1);
-      if (sameAgentContinuationDisposition({
-        continuationKind: effect.continuationKind,
-        automatic: automaticSameAgentContinuationEnabled(
-          agent?.adapterConfig,
-          process.env.PAPERCLIP_AUTOMATIC_SAME_AGENT_CONTINUATION,
-        ),
-      }) === "require_approval") {
+      if (action === "require_approval") {
         const interaction = await issueThreadInteractionService(input.tx).create(input.issue, {
           kind: "request_confirmation",
           idempotencyKey: `native-status:${input.decisionId}:continuation-approval`,
@@ -2071,6 +2098,7 @@ export async function commitNativeStatusDecision(input: {
           runId: input.runId,
           decisionId: decisionRow.id,
           effect,
+          projectedStatus: input.decision.toStatus,
           failpoint: input.failpoint,
           preMaterializedEffects,
           terminalRunsToEmit,
